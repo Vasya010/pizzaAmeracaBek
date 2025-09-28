@@ -7,9 +7,9 @@
     "dev": "nodemon server.js"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.802.0",
-    "@aws-sdk/lib-storage": "^3.802.0",
-    "axios": "^1.9.0",
+    "@aws-sdk/client-s3": "^3.896.0",
+    "@aws-sdk/lib-storage": "^3.896.0",
+    "axios": "^1.12.2",
     "bcryptjs": "^2.4.3",
     "compression": "^1.8.0",
     "cors": "^2.8.5",
@@ -19,7 +19,7 @@
     "ioredis": "^5.6.1",
     "jsonwebtoken": "^9.0.2",
     "multer": "^1.4.5-lts.1",
-    "mysql2": "^3.14.1",
+    "mysql2": "^3.15.1",
     "twilio": "^5.7.2"
   },
   "devDependencies": {
