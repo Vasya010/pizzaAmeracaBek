@@ -62,7 +62,7 @@ const upload = multer({
 
 // Функция для загрузки изображения в S3
 const uploadToS3 = async (file) => {
-  const key = `boody-images/${Date.now()}${path.extname(file.originalname)}`;
+  const key = `pizza-images/${Date.now()}${path.extname(file.originalname)}`;
   const params = {
     Bucket: S3_BUCKET,
     Key: key,
