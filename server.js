@@ -126,7 +126,7 @@ app.get('/', (req, res) => {
   res.send('Pizza API is running');
 });
 
-// Маршрут для получения списка администраторов
+// Маршрут для получения списка администраторов44
 app.get('/api/admins', async (req, res) => {
   try {
     const pool = await initializeDatabase();
