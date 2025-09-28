@@ -8,7 +8,7 @@ const path = require("path");
 const { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } = require("@aws-sdk/client-s3");
 const { Upload } = require("@aws-sdk/lib-storage");
 const axios = require("axios");
-const admin = require("firebase-admin"); // Импорт Firebase Admin SDK
+
 
 const app = express();
 app.use(cors());
