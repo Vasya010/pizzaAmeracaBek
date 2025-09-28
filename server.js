@@ -8,20 +8,27 @@ const path = require('path');
 const { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { Upload } = require('@aws-sdk/lib-storage');
 const axios = require('axios');
+require('dotenv').config(); // Added to load environment variables
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Hardcoded sensitive data (not recommended for production)
+// Environment Variables for Sensitive Data
 const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret_key_very_secure_random_string';
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '7858016810:AAELHxlmZORP7iHEIWdqYKw-rHl-q3aB8yY';
+const S3_ACCESS_KEY = process.env.S3_ACCESS_KEY || 'GIMZKRMOGP4F0MOTLVCE';
+const S3_SECRET_KEY = process.env.S3_SECRET_KEY || 'WvhFfIzzCkITUrXfD8JfoDne7LmBhnNzDuDBj89I';
+const MYSQL_HOST = process.env.MYSQL_HOST || 'vh446.timeweb.ru';
+const MYSQL_USER = process.env.MYSQL_USER || 'cz45780_pizzaame';
+const MYSQL_PASSWORD = process.env.MYSQL_PASSWORD || 'Vasya11091109';
+const MYSQL_DATABASE = process.env.MYSQL_DATABASE || 'cz45780_pizzaame';
 
 // S3 Configuration
 const s3Client = new S3Client({
   credentials: {
-    accessKeyId: process.env.S3_ACCESS_KEY || 'GIMZKRMOGP4F0MOTLVCE',
-    secretAccessKey: process.env.S3_SECRET_KEY || 'WvhFfIzzCkITUrXfD8JfoDne7LmBhnNzDuDBj89I',
+    accessKeyId: S3_ACCESS_KEY,
+    secretAccessKey: S3_SECRET_KEY,
   },
   endpoint: 'https://s3.twcstorage.ru',
   region: 'ru-1',
@@ -106,12 +113,17 @@ function deleteFromS3(key, callback) {
   });
 }
 
-// MySQL Connection
+// MySQL Connection with Retry Logic
 const db = mysql.createPool({
-  host: 'vh446.timeweb.ru',
-  user: 'cz45780_pizzaame',
-  password: 'Vasya11091109',
-  database: 'cz45780_pizzaame',
+  host: MYSQL_HOST,
+  user: MYSQL_USER,
+  password: MYSQL_PASSWORD,
+  database: MYSQL_DATABASE,
+  connectionLimit: 10, // Limit the number of connections in the pool
+  connectTimeout: 10000, // 10 seconds timeout
+  acquireTimeout: 10000, // 10 seconds to acquire a connection
+  waitForConnections: true, // Wait for a connection to become available
+  queueLimit: 0, // Unlimited queue for pending connections
 });
 
 // Middleware for token authentication
@@ -151,460 +163,457 @@ app.get('/product-image/:key', optionalAuthenticateToken, (req, res) => {
   });
 });
 
-// Initialize server
+// Initialize server with retry logic
 function initializeServer(callback) {
-  // Test MySQL connection
-  db.getConnection((err, connection) => {
-    if (err) {
-      console.error('Ошибка подключения к MySQL:', err.stack);
-      return callback(new Error(`MySQL connection failed: ${err.message}`));
-    }
+  const maxRetries = 5;
+  let retryCount = 0;
 
-    connection.query('SELECT 1', (err) => {
+  function attemptConnection() {
+    console.log(`Попытка подключения к MySQL (попытка ${retryCount + 1} из ${maxRetries})...`);
+    db.getConnection((err, connection) => {
       if (err) {
-        console.error('Ошибка проверки подключения к MySQL:', err.stack);
-        connection.release();
-        return callback(new Error(`MySQL connection test failed: ${err.message}`));
-      }
-      console.log('Подключено к MySQL');
-
-      // Create tables and initialize data
-      connection.query(`
-        CREATE TABLE IF NOT EXISTS branches (
-          id INT AUTO_INCREMENT PRIMARY KEY,
-          name VARCHAR(255) NOT NULL,
-          address VARCHAR(255),
-          phone VARCHAR(20),
-          telegram_chat_id VARCHAR(50),
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-      `, (err) => {
-        if (err) {
-          console.error('Ошибка создания таблицы branches:', err.stack);
-          connection.release();
-          return callback(err);
+        console.error('Ошибка подключения к MySQL:', err.stack);
+        retryCount++;
+        if (retryCount < maxRetries) {
+          console.log(`Повторная попытка через 5 секунд...`);
+          setTimeout(attemptConnection, 5000);
+        } else {
+          return callback(new Error(`MySQL connection failed after ${maxRetries} attempts: ${err.message}`));
         }
-        console.log('Таблица branches проверена/создана');
-
-        // Add columns to branches if missing
-        connection.query('SHOW COLUMNS FROM branches LIKE "address"', (err, branchColumns) => {
+        return;
+      }
+      connection.query('SELECT 1', (err) => {
+        if (err) {
+          console.error('Ошибка проверки подключения к MySQL:', err.stack);
+          connection.release();
+          return callback(new Error(`MySQL connection test failed: ${err.message}`));
+        }
+        console.log('Подключено к MySQL');
+        // Create tables and initialize data
+        connection.query(`
+          CREATE TABLE IF NOT EXISTS branches (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            name VARCHAR(255) NOT NULL,
+            address VARCHAR(255),
+            phone VARCHAR(20),
+            telegram_chat_id VARCHAR(50),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          )
+        `, (err) => {
           if (err) {
-            console.error('Ошибка проверки колонок branches:', err.stack);
+            console.error('Ошибка создания таблицы branches:', err.stack);
             connection.release();
             return callback(err);
           }
-          if (branchColumns.length === 0) {
-            connection.query('ALTER TABLE branches ADD COLUMN address VARCHAR(255), ADD COLUMN phone VARCHAR(20)', (err) => {
-              if (err) {
-                console.error('Ошибка добавления колонок в branches:', err.stack);
-                connection.release();
-                return callback(err);
-              }
-              console.log('Добавлены колонки address и phone в таблицу branches');
-            });
-          }
-
-          connection.query('SHOW COLUMNS FROM branches LIKE "telegram_chat_id"', (err, telegramColumns) => {
+          console.log('Таблица branches проверена/создана');
+          // Add columns to branches if missing
+          connection.query('SHOW COLUMNS FROM branches LIKE "address"', (err, branchColumns) => {
             if (err) {
-              console.error('Ошибка проверки колонки telegram_chat_id:', err.stack);
+              console.error('Ошибка проверки колонок branches:', err.stack);
               connection.release();
               return callback(err);
             }
-            if (telegramColumns.length === 0) {
-              connection.query('ALTER TABLE branches ADD COLUMN telegram_chat_id VARCHAR(50)', (err) => {
+            if (branchColumns.length === 0) {
+              connection.query('ALTER TABLE branches ADD COLUMN address VARCHAR(255), ADD COLUMN phone VARCHAR(20)', (err) => {
                 if (err) {
-                  console.error('Ошибка добавления колонки telegram_chat_id:', err.stack);
+                  console.error('Ошибка добавления колонок в branches:', err.stack);
                   connection.release();
                   return callback(err);
                 }
-                console.log('Добавлена колонка telegram_chat_id в таблицу branches');
+                console.log('Добавлены колонки address и phone в таблицу branches');
               });
             }
-
-            // Initialize branches
-            connection.query('SELECT * FROM branches', (err, branches) => {
+            connection.query('SHOW COLUMNS FROM branches LIKE "telegram_chat_id"', (err, telegramColumns) => {
               if (err) {
-                console.error('Ошибка получения филиалов:', err.stack);
+                console.error('Ошибка проверки колонки telegram_chat_id:', err.stack);
                 connection.release();
                 return callback(err);
               }
-              if (branches.length === 0) {
-                const insertBranches = [
-                  ['BOODAI PIZZA', '-1002311447135'],
-                  ['Район', '-1002638475628'],
-                  ['Араванский', '-1002311447135'],
-                  ['Ошский район', '-1002638475628'],
-                ];
-                let inserted = 0;
-                insertBranches.forEach(([name, telegram_chat_id], index) => {
-                  connection.query(
-                    'INSERT INTO branches (name, telegram_chat_id) VALUES (?, ?)',
-                    [name, telegram_chat_id],
-                    (err) => {
-                      if (err) {
-                        console.error('Ошибка вставки филиала:', err.stack);
-                        connection.release();
-                        return callback(err);
-                      }
-                      inserted++;
-                      if (inserted === insertBranches.length) {
-                        console.log('Добавлены филиалы с telegram_chat_id');
-                        continueInitialization();
-                      }
-                    }
-                  );
-                });
-              } else {
-                const updateQueries = [
-                  ['BOODAI PIZZA', '-1002311447135'],
-                  ['Район', '-1002638475628'],
-                  ['Араванский', '-1002311447135'],
-                  ['Ошский район', '-1002638475628'],
-                ];
-                let updated = 0;
-                updateQueries.forEach(([name, telegram_chat_id]) => {
-                  connection.query(
-                    'UPDATE branches SET telegram_chat_id = ? WHERE name = ? AND (telegram_chat_id IS NULL OR telegram_chat_id = "")',
-                    [telegram_chat_id, name],
-                    (err) => {
-                      if (err) {
-                        console.error('Ошибка обновления telegram_chat_id:', err.stack);
-                        connection.release();
-                        return callback(err);
-                      }
-                      updated++;
-                      if (updated === updateQueries.length) {
-                        console.log('Обновлены telegram_chat_id для существующих филиалов');
-                        continueInitialization();
-                      }
-                    }
-                  );
-                });
-              }
-            });
-          });
-        });
-      });
-
-      function continueInitialization() {
-        // Check telegram_chat_id for branches
-        connection.query('SELECT id, name, telegram_chat_id FROM branches', (err, branches) => {
-          if (err) {
-            console.error('Ошибка проверки telegram_chat_id:', err.stack);
-            connection.release();
-            return callback(err);
-          }
-          branches.forEach(branch => {
-            if (!branch.telegram_chat_id) {
-              console.warn(`Филиал "${branch.name}" (id: ${branch.id}) не имеет telegram_chat_id. Установите его через админ-панель.`);
-            }
-          });
-
-          // Add columns to products if missing
-          connection.query('SHOW COLUMNS FROM products', (err, productColumns) => {
-            if (err) {
-              console.error('Ошибка проверки колонок products:', err.stack);
-              connection.release();
-              return callback(err);
-            }
-            const columns = productColumns.map(col => col.Field);
-            let productAlterations = 0;
-            const checkProductAlterations = () => {
-              productAlterations++;
-              if (productAlterations === 3) createSubcategoriesTable();
-            };
-            if (!columns.includes('mini_recipe')) {
-              connection.query('ALTER TABLE products ADD COLUMN mini_recipe TEXT', (err) => {
-                if (err) {
-                  console.error('Ошибка добавления колонки mini_recipe:', err.stack);
-                  connection.release();
-                  return callback(err);
-                }
-                console.log('Добавлена колонка mini_recipe в таблицу products');
-                checkProductAlterations();
-              });
-            } else {
-              checkProductAlterations();
-            }
-            if (!columns.includes('sub_category_id')) {
-              connection.query('ALTER TABLE products ADD COLUMN sub_category_id INT', (err) => {
-                if (err) {
-                  console.error('Ошибка добавления колонки sub_category_id:', err.stack);
-                  connection.release();
-                  return callback(err);
-                }
-                console.log('Добавлена колонка sub_category_id в таблицу products');
-                checkProductAlterations();
-              });
-            } else {
-              checkProductAlterations();
-            }
-            if (!columns.includes('is_pizza')) {
-              connection.query('ALTER TABLE products ADD COLUMN is_pizza BOOLEAN DEFAULT FALSE', (err) => {
-                if (err) {
-                  console.error('Ошибка добавления колонки is_pizza:', err.stack);
-                  connection.release();
-                  return callback(err);
-                }
-                console.log('Добавлена колонка is_pizza в таблицу products');
-                checkProductAlterations();
-              });
-            } else {
-              checkProductAlterations();
-            }
-          });
-        });
-      }
-
-      function createSubcategoriesTable() {
-        connection.query(`
-          CREATE TABLE IF NOT EXISTS subcategories (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            name VARCHAR(255) NOT NULL,
-            category_id INT NOT NULL,
-            FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE
-          )
-        `, (err) => {
-          if (err) {
-            console.error('Ошибка создания таблицы subcategories:', err.stack);
-            connection.release();
-            return callback(err);
-          }
-          console.log('Таблица subcategories проверена/создана');
-          createPromoCodesTable();
-        });
-      }
-
-      function createPromoCodesTable() {
-        connection.query(`
-          CREATE TABLE IF NOT EXISTS promo_codes (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            code VARCHAR(50) NOT NULL UNIQUE,
-            discount_percent INT NOT NULL,
-            expires_at TIMESTAMP NULL DEFAULT NULL,
-            is_active BOOLEAN DEFAULT TRUE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-          )
-        `, (err) => {
-          if (err) {
-            console.error('Ошибка создания таблицы promo_codes:', err.stack);
-            connection.release();
-            return callback(err);
-          }
-          console.log('Таблица promo_codes проверена/создана');
-          createOrdersTable();
-        });
-      }
-
-      function createOrdersTable() {
-        connection.query(`
-          CREATE TABLE IF NOT EXISTS orders (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            branch_id INT NOT NULL,
-            total DECIMAL(10,2) NOT NULL,
-            status ENUM('pending', 'processing', 'completed', 'cancelled') DEFAULT 'pending',
-            order_details JSON,
-            delivery_details JSON,
-            cart_items JSON,
-            discount INT DEFAULT 0,
-            promo_code VARCHAR(50),
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE CASCADE
-          )
-        `, (err) => {
-          if (err) {
-            console.error('Ошибка создания таблицы orders:', err.stack);
-            connection.release();
-            return callback(err);
-          }
-          console.log('Таблица orders проверена/создана');
-          createStoriesTable();
-        });
-      }
-
-      function createStoriesTable() {
-        connection.query(`
-          CREATE TABLE IF NOT EXISTS stories (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            image VARCHAR(255) NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-          )
-        `, (err) => {
-          if (err) {
-            console.error('Ошибка создания таблицы stories:', err.stack);
-            connection.release();
-            return callback(err);
-          }
-          console.log('Таблица stories проверена/создана');
-          createDiscountsTable();
-        });
-      }
-
-      function createDiscountsTable() {
-        connection.query(`
-          CREATE TABLE IF NOT EXISTS discounts (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            product_id INT NOT NULL,
-            discount_percent INT NOT NULL,
-            expires_at TIMESTAMP NULL DEFAULT NULL,
-            is_active BOOLEAN DEFAULT TRUE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
-          )
-        `, (err) => {
-          if (err) {
-            console.error('Ошибка создания таблицы discounts:', err.stack);
-            connection.release();
-            return callback(err);
-          }
-          console.log('Таблица discounts проверена/создана');
-          createBannersTable();
-        });
-      }
-
-      function createBannersTable() {
-        connection.query(`
-          CREATE TABLE IF NOT EXISTS banners (
-            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-            image VARCHAR(255) NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            title VARCHAR(255) DEFAULT NULL,
-            description TEXT DEFAULT NULL,
-            button_text VARCHAR(100) DEFAULT NULL,
-            promo_code_id INT DEFAULT NULL,
-            FOREIGN KEY (promo_code_id) REFERENCES promo_codes(id) ON DELETE SET NULL
-          )
-        `, (err) => {
-          if (err) {
-            console.error('Ошибка создания таблицы banners:', err.stack);
-            connection.release();
-            return callback(err);
-          }
-          console.log('Таблица banners проверена/создана');
-          createSaucesTable();
-        });
-      }
-
-      function createSaucesTable() {
-        connection.query(`
-          CREATE TABLE IF NOT EXISTS sauces (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            name VARCHAR(255) NOT NULL,
-            price DECIMAL(10,2) NOT NULL,
-            image VARCHAR(255) DEFAULT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-          )
-        `, (err) => {
-          if (err) {
-            console.error('Ошибка создания таблицы sauces:', err.stack);
-            connection.release();
-            return callback(err);
-          }
-          console.log('Таблица sauces проверена/создана');
-          createProductsSaucesTable();
-        });
-      }
-
-      function createProductsSaucesTable() {
-        connection.query(`
-          CREATE TABLE IF NOT EXISTS products_sauces (
-            product_id INT NOT NULL,
-            sauce_id INT NOT NULL,
-            PRIMARY KEY (product_id, sauce_id),
-            FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE,
-            FOREIGN KEY (sauce_id) REFERENCES sauces(id) ON DELETE CASCADE
-          )
-        `, (err) => {
-          if (err) {
-            console.error('Ошибка создания таблицы products_sauces:', err.stack);
-            connection.release();
-            return callback(err);
-          }
-          console.log('Таблица products_sauces проверена/создана');
-          addDiscountColumns();
-        });
-      }
-
-      function addDiscountColumns() {
-        connection.query('SHOW COLUMNS FROM discounts', (err, discountColumns) => {
-          if (err) {
-            console.error('Ошибка проверки колонок discounts:', err.stack);
-            connection.release();
-            return callback(err);
-          }
-          const discountFields = discountColumns.map(col => col.Field);
-          let discountAlterations = 0;
-          const checkDiscountAlterations = () => {
-            discountAlterations++;
-            if (discountAlterations === 2) createAdminUser();
-          };
-          if (!discountFields.includes('expires_at')) {
-            connection.query('ALTER TABLE discounts ADD COLUMN expires_at TIMESTAMP NULL DEFAULT NULL', (err) => {
-              if (err) {
-                console.error('Ошибка добавления колонки expires_at:', err.stack);
-                connection.release();
-                return callback(err);
-              }
-              console.log('Добавлена колонка expires_at в таблицу discounts');
-              checkDiscountAlterations();
-            });
-          } else {
-            checkDiscountAlterations();
-          }
-          if (!discountFields.includes('is_active')) {
-            connection.query('ALTER TABLE discounts ADD COLUMN is_active BOOLEAN DEFAULT TRUE', (err) => {
-              if (err) {
-                console.error('Ошибка добавления колонки is_active:', err.stack);
-                connection.release();
-                return callback(err);
-              }
-              console.log('Добавлена колонка is_active в таблицу discounts');
-              checkDiscountAlterations();
-            });
-          } else {
-            checkDiscountAlterations();
-          }
-        });
-      }
-
-      function createAdminUser() {
-        connection.query('SELECT * FROM users WHERE email = ?', ['admin@boodaypizza.com'], (err, users) => {
-          if (err) {
-            console.error('Ошибка проверки администратора:', err.stack);
-            connection.release();
-            return callback(err);
-          }
-          if (users.length === 0) {
-            bcrypt.hash('admin123', 10, (err, hashedPassword) => {
-              if (err) {
-                console.error('Ошибка хеширования пароля:', err.stack);
-                connection.release();
-                return callback(err);
-              }
-              connection.query(
-                'INSERT INTO users (name, email, password) VALUES (?, ?, ?)',
-                ['Admin', 'admin@boodaypizza.com', hashedPassword],
-                (err) => {
+              if (telegramColumns.length === 0) {
+                connection.query('ALTER TABLE branches ADD COLUMN telegram_chat_id VARCHAR(50)', (err) => {
                   if (err) {
-                    console.error('Ошибка создания админа:', err.stack);
+                    console.error('Ошибка добавления колонки telegram_chat_id:', err.stack);
                     connection.release();
                     return callback(err);
                   }
-                  console.log('Админ создан: admin@boodaypizza.com / admin123');
+                  console.log('Добавлена колонка telegram_chat_id в таблицу branches');
+                });
+              }
+              // Initialize branches
+              connection.query('SELECT * FROM branches', (err, branches) => {
+                if (err) {
+                  console.error('Ошибка получения филиалов:', err.stack);
                   connection.release();
-                  testS3Connection(callback);
+                  return callback(err);
                 }
-              );
+                if (branches.length === 0) {
+                  const insertBranches = [
+                    ['BOODAI PIZZA', '-1002311447135'],
+                    ['Район', '-1002638475628'],
+                    ['Араванский', '-1002311447135'],
+                    ['Ошский район', '-1002638475628'],
+                  ];
+                  let inserted = 0;
+                  insertBranches.forEach(([name, telegram_chat_id], index) => {
+                    connection.query(
+                      'INSERT INTO branches (name, telegram_chat_id) VALUES (?, ?)',
+                      [name, telegram_chat_id],
+                      (err) => {
+                        if (err) {
+                          console.error('Ошибка вставки филиала:', err.stack);
+                          connection.release();
+                          return callback(err);
+                        }
+                        inserted++;
+                        if (inserted === insertBranches.length) {
+                          console.log('Добавлены филиалы с telegram_chat_id');
+                          continueInitialization();
+                        }
+                      }
+                    );
+                  });
+                } else {
+                  const updateQueries = [
+                    ['BOODAI PIZZA', '-1002311447135'],
+                    ['Район', '-1002638475628'],
+                    ['Араванский', '-1002311447135'],
+                    ['Ошский район', '-1002638475628'],
+                  ];
+                  let updated = 0;
+                  updateQueries.forEach(([name, telegram_chat_id]) => {
+                    connection.query(
+                      'UPDATE branches SET telegram_chat_id = ? WHERE name = ? AND (telegram_chat_id IS NULL OR telegram_chat_id = "")',
+                      [telegram_chat_id, name],
+                      (err) => {
+                        if (err) {
+                          console.error('Ошибка обновления telegram_chat_id:', err.stack);
+                          connection.release();
+                          return callback(err);
+                        }
+                        updated++;
+                        if (updated === updateQueries.length) {
+                          console.log('Обновлены telegram_chat_id для существующих филиалов');
+                          continueInitialization();
+                        }
+                      }
+                    );
+                  });
+                }
+              });
             });
-          } else {
-            console.log('Админ уже существует: admin@boodaypizza.com');
-            connection.release();
-            testS3Connection(callback);
-          }
+          });
         });
-      }
+        function continueInitialization() {
+          // Check telegram_chat_id for branches
+          connection.query('SELECT id, name, telegram_chat_id FROM branches', (err, branches) => {
+            if (err) {
+              console.error('Ошибка проверки telegram_chat_id:', err.stack);
+              connection.release();
+              return callback(err);
+            }
+            branches.forEach(branch => {
+              if (!branch.telegram_chat_id) {
+                console.warn(`Филиал "${branch.name}" (id: ${branch.id}) не имеет telegram_chat_id. Установите его через админ-панель.`);
+              }
+            });
+            // Add columns to products if missing
+            connection.query('SHOW COLUMNS FROM products', (err, productColumns) => {
+              if (err) {
+                console.error('Ошибка проверки колонок products:', err.stack);
+                connection.release();
+                return callback(err);
+              }
+              const columns = productColumns.map(col => col.Field);
+              let productAlterations = 0;
+              const checkProductAlterations = () => {
+                productAlterations++;
+                if (productAlterations === 3) createSubcategoriesTable();
+              };
+              if (!columns.includes('mini_recipe')) {
+                connection.query('ALTER TABLE products ADD COLUMN mini_recipe TEXT', (err) => {
+                  if (err) {
+                    console.error('Ошибка добавления колонки mini_recipe:', err.stack);
+                    connection.release();
+                    return callback(err);
+                  }
+                  console.log('Добавлена колонка mini_recipe в таблицу products');
+                  checkProductAlterations();
+                });
+              } else {
+                checkProductAlterations();
+              }
+              if (!columns.includes('sub_category_id')) {
+                connection.query('ALTER TABLE products ADD COLUMN sub_category_id INT', (err) => {
+                  if (err) {
+                    console.error('Ошибка добавления колонки sub_category_id:', err.stack);
+                    connection.release();
+                    return callback(err);
+                  }
+                  console.log('Добавлена колонка sub_category_id в таблицу products');
+                  checkProductAlterations();
+                });
+              } else {
+                checkProductAlterations();
+              }
+              if (!columns.includes('is_pizza')) {
+                connection.query('ALTER TABLE products ADD COLUMN is_pizza BOOLEAN DEFAULT FALSE', (err) => {
+                  if (err) {
+                    console.error('Ошибка добавления колонки is_pizza:', err.stack);
+                    connection.release();
+                    return callback(err);
+                  }
+                  console.log('Добавлена колонка is_pizza в таблицу products');
+                  checkProductAlterations();
+                });
+              } else {
+                checkProductAlterations();
+              }
+            });
+          });
+        }
+        function createSubcategoriesTable() {
+          connection.query(`
+            CREATE TABLE IF NOT EXISTS subcategories (
+              id INT AUTO_INCREMENT PRIMARY KEY,
+              name VARCHAR(255) NOT NULL,
+              category_id INT NOT NULL,
+              FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE
+            )
+          `, (err) => {
+            if (err) {
+              console.error('Ошибка создания таблицы subcategories:', err.stack);
+              connection.release();
+              return callback(err);
+            }
+            console.log('Таблица subcategories проверена/создана');
+            createPromoCodesTable();
+          });
+        }
+        function createPromoCodesTable() {
+          connection.query(`
+            CREATE TABLE IF NOT EXISTS promo_codes (
+              id INT AUTO_INCREMENT PRIMARY KEY,
+              code VARCHAR(50) NOT NULL UNIQUE,
+              discount_percent INT NOT NULL,
+              expires_at TIMESTAMP NULL DEFAULT NULL,
+              is_active BOOLEAN DEFAULT TRUE,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+          `, (err) => {
+            if (err) {
+              console.error('Ошибка создания таблицы promo_codes:', err.stack);
+              connection.release();
+              return callback(err);
+            }
+            console.log('Таблица promo_codes проверена/создана');
+            createOrdersTable();
+          });
+        }
+        function createOrdersTable() {
+          connection.query(`
+            CREATE TABLE IF NOT EXISTS orders (
+              id INT AUTO_INCREMENT PRIMARY KEY,
+              branch_id INT NOT NULL,
+              total DECIMAL(10,2) NOT NULL,
+              status ENUM('pending', 'processing', 'completed', 'cancelled') DEFAULT 'pending',
+              order_details JSON,
+              delivery_details JSON,
+              cart_items JSON,
+              discount INT DEFAULT 0,
+              promo_code VARCHAR(50),
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE CASCADE
+            )
+          `, (err) => {
+            if (err) {
+              console.error('Ошибка создания таблицы orders:', err.stack);
+              connection.release();
+              return callback(err);
+            }
+            console.log('Таблица orders проверена/создана');
+            createStoriesTable();
+          });
+        }
+        function createStoriesTable() {
+          connection.query(`
+            CREATE TABLE IF NOT EXISTS stories (
+              id INT AUTO_INCREMENT PRIMARY KEY,
+              image VARCHAR(255) NOT NULL,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+          `, (err) => {
+            if (err) {
+              console.error('Ошибка создания таблицы stories:', err.stack);
+              connection.release();
+              return callback(err);
+            }
+            console.log('Таблица stories проверена/создана');
+            createDiscountsTable();
+          });
+        }
+        function createDiscountsTable() {
+          connection.query(`
+            CREATE TABLE IF NOT EXISTS discounts (
+              id INT AUTO_INCREMENT PRIMARY KEY,
+              product_id INT NOT NULL,
+              discount_percent INT NOT NULL,
+              expires_at TIMESTAMP NULL DEFAULT NULL,
+              is_active BOOLEAN DEFAULT TRUE,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+            )
+          `, (err) => {
+            if (err) {
+              console.error('Ошибка создания таблицы discounts:', err.stack);
+              connection.release();
+              return callback(err);
+            }
+            console.log('Таблица discounts проверена/создана');
+            createBannersTable();
+          });
+        }
+        function createBannersTable() {
+          connection.query(`
+            CREATE TABLE IF NOT EXISTS banners (
+              id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+              image VARCHAR(255) NOT NULL,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              title VARCHAR(255) DEFAULT NULL,
+              description TEXT DEFAULT NULL,
+              button_text VARCHAR(100) DEFAULT NULL,
+              promo_code_id INT DEFAULT NULL,
+              FOREIGN KEY (promo_code_id) REFERENCES promo_codes(id) ON DELETE SET NULL
+            )
+          `, (err) => {
+            if (err) {
+              console.error('Ошибка создания таблицы banners:', err.stack);
+              connection.release();
+              return callback(err);
+            }
+            console.log('Таблица banners проверена/создана');
+            createSaucesTable();
+          });
+        }
+        function createSaucesTable() {
+          connection.query(`
+            CREATE TABLE IF NOT EXISTS sauces (
+              id INT AUTO_INCREMENT PRIMARY KEY,
+              name VARCHAR(255) NOT NULL,
+              price DECIMAL(10,2) NOT NULL,
+              image VARCHAR(255) DEFAULT NULL,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+          `, (err) => {
+            if (err) {
+              console.error('Ошибка создания таблицы sauces:', err.stack);
+              connection.release();
+              return callback(err);
+            }
+            console.log('Таблица sauces проверена/создана');
+            createProductsSaucesTable();
+          });
+        }
+        function createProductsSaucesTable() {
+          connection.query(`
+            CREATE TABLE IF NOT EXISTS products_sauces (
+              product_id INT NOT NULL,
+              sauce_id INT NOT NULL,
+              PRIMARY KEY (product_id, sauce_id),
+              FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE,
+              FOREIGN KEY (sauce_id) REFERENCES sauces(id) ON DELETE CASCADE
+            )
+          `, (err) => {
+            if (err) {
+              console.error('Ошибка создания таблицы products_sauces:', err.stack);
+              connection.release();
+              return callback(err);
+            }
+            console.log('Таблица products_sauces проверена/создана');
+            addDiscountColumns();
+          });
+        }
+        function addDiscountColumns() {
+          connection.query('SHOW COLUMNS FROM discounts', (err, discountColumns) => {
+            if (err) {
+              console.error('Ошибка проверки колонок discounts:', err.stack);
+              connection.release();
+              return callback(err);
+            }
+            const discountFields = discountColumns.map(col => col.Field);
+            let discountAlterations = 0;
+            const checkDiscountAlterations = () => {
+              discountAlterations++;
+              if (discountAlterations === 2) createAdminUser();
+            };
+            if (!discountFields.includes('expires_at')) {
+              connection.query('ALTER TABLE discounts ADD COLUMN expires_at TIMESTAMP NULL DEFAULT NULL', (err) => {
+                if (err) {
+                  console.error('Ошибка добавления колонки expires_at:', err.stack);
+                  connection.release();
+                  return callback(err);
+                }
+                console.log('Добавлена колонка expires_at в таблицу discounts');
+                checkDiscountAlterations();
+              });
+            } else {
+              checkDiscountAlterations();
+            }
+            if (!discountFields.includes('is_active')) {
+              connection.query('ALTER TABLE discounts ADD COLUMN is_active BOOLEAN DEFAULT TRUE', (err) => {
+                if (err) {
+                  console.error('Ошибка добавления колонки is_active:', err.stack);
+                  connection.release();
+                  return callback(err);
+                }
+                console.log('Добавлена колонка is_active в таблицу discounts');
+                checkDiscountAlterations();
+              });
+            } else {
+              checkDiscountAlterations();
+            }
+          });
+        }
+        function createAdminUser() {
+          connection.query('SELECT * FROM users WHERE email = ?', ['admin@boodaypizza.com'], (err, users) => {
+            if (err) {
+              console.error('Ошибка проверки администратора:', err.stack);
+              connection.release();
+              return callback(err);
+            }
+            if (users.length === 0) {
+              bcrypt.hash('admin123', 10, (err, hashedPassword) => {
+                if (err) {
+                  console.error('Ошибка хеширования пароля:', err.stack);
+                  connection.release();
+                  return callback(err);
+                }
+                connection.query(
+                  'INSERT INTO users (name, email, password) VALUES (?, ?, ?)',
+                  ['Admin', 'admin@boodaypizza.com', hashedPassword],
+                  (err) => {
+                    if (err) {
+                      console.error('Ошибка создания админа:', err.stack);
+                      connection.release();
+                      return callback(err);
+                    }
+                    console.log('Админ создан: admin@boodaypizza.com / admin123');
+                    connection.release();
+                    testS3Connection(callback);
+                  }
+                );
+              });
+            } else {
+              console.log('Админ уже существует: admin@boodaypizza.com');
+              connection.release();
+              testS3Connection(callback);
+            }
+          });
+        }
+      });
     });
-  });
+  }
+
+  attemptConnection();
 }
 
 // Public routes
@@ -739,10 +748,27 @@ app.post('/api/public/send-order', (req, res) => {
   if (!branchId) {
     return res.status(400).json({ error: 'Не указан филиал (branchId отсутствует)' });
   }
-  const total = cartItems.reduce((sum, item) => sum + (Number(item.originalPrice) || 0) * item.quantity, 0);
-  const discountedTotal = total * (1 - (discount || 0) / 100);
-  const escapeMarkdown = (text) => (text ? text.replace(/([_*[\]()~`>#+-.!])/g, '\\$1') : 'Нет');
-  const orderText = `
+  db.query('SELECT name, telegram_chat_id FROM branches WHERE id = ?', [branchId], (err, branch) => {
+    if (err) {
+      console.error('Ошибка получения филиала:', err.stack);
+      return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
+    }
+    if (branch.length === 0) {
+      console.error(`Филиал с id ${branchId} не найден в базе данных`);
+      return res.status(400).json({ error: `Филиал с id ${branchId} не найден` });
+    }
+    const branchName = branch[0].name;
+    const chatId = branch[0].telegram_chat_id;
+    if (!chatId) {
+      console.error(`Для филиала с id ${branchId} (название: ${branchName}) не указан telegram_chat_id`);
+      return res.status(500).json({
+        error: `Для филиала "${branchName}" не настроен Telegram chat ID. Пожалуйста, свяжитесь с администратором для настройки.`,
+      });
+    }
+    const total = cartItems.reduce((sum, item) => sum + (Number(item.originalPrice) || 0) * item.quantity, 0);
+    const discountedTotal = total * (1 - (discount || 0) / 100);
+    const escapeMarkdown = (text) => (text ? text.replace(/([_*[\]()~`>#+-.!])/g, '\\$1') : 'Нет');
+    const orderText = `
 📦 *Новый заказ:*
 🏪 Филиал: ${escapeMarkdown(branchName)}
 👤 Имя: ${escapeMarkdown(orderDetails.name || deliveryDetails.name)}
@@ -754,43 +780,27 @@ ${cartItems.map((item) => `- ${escapeMarkdown(item.name)} (${item.quantity} шт
 💰 Итоговая стоимость: ${total.toFixed(2)} сом
 ${promoCode ? `💸 Скидка (${discount}%): ${discountedTotal.toFixed(2)} сом` : '💸 Скидка не применена'}
 💰 Итоговая сумма: ${discountedTotal.toFixed(2)} сом
-  `;
-  db.query(
-    `
-    INSERT INTO orders (branch_id, total, status, order_details, delivery_details, cart_items, discount, promo_code)
-    VALUES (?, ?, 'pending', ?, ?, ?, ?, ?)
-  `,
-    [
-      branchId,
-      discountedTotal,
-      JSON.stringify(orderDetails),
-      JSON.stringify(deliveryDetails),
-      JSON.stringify(cartItems),
-      discount || 0,
-      promoCode || null,
-    ],
-    (err, result) => {
-      if (err) {
-        console.error('Ошибка при отправке заказа:', err.stack);
-        return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
-      }
-      db.query('SELECT name, telegram_chat_id FROM branches WHERE id = ?', [branchId], (err, branch) => {
+    `;
+    db.query(
+      `
+      INSERT INTO orders (branch_id, total, status, order_details, delivery_details, cart_items, discount, promo_code)
+      VALUES (?, ?, 'pending', ?, ?, ?, ?, ?)
+    `,
+      [
+        branchId,
+        discountedTotal,
+        JSON.stringify(orderDetails),
+        JSON.stringify(deliveryDetails),
+        JSON.stringify(cartItems),
+        discount || 0,
+        promoCode || null,
+      ],
+      (err, result) => {
         if (err) {
-          console.error('Ошибка получения филиала:', err.stack);
+          console.error('Ошибка при отправке заказа:', err.stack);
           return res.status(500).json({ error: `Ошибка сервера: ${err.message}` });
         }
-        if (branch.length === 0) {
-          console.error(`Филиал с id ${branchId} не найден в базе данных`);
-          return res.status(400).json({ error: `Филиал с id ${branchId} не найден` });
-        }
-        const chatId = branch[0].telegram_chat_id;
-        if (!chatId) {
-          console.error(`Для филиала с id ${branchId} (название: ${branch[0].name}) не указан telegram_chat_id`);
-          return res.status(500).json({
-            error: `Для филиала "${branch[0].name}" не настроен Telegram chat ID. Пожалуйста, свяжитесь с администратором для настройки.`,
-          });
-        }
-        console.log(`Отправка заказа в Telegram для филиала "${branch[0].name}" (id: ${branchId}, chat_id: ${chatId})`);
+        console.log(`Отправка заказа в Telegram для филиала "${branchName}" (id: ${branchId}, chat_id: ${chatId})`);
         axios.post(
           `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
           {
@@ -811,9 +821,9 @@ ${promoCode ? `💸 Скидка (${discount}%): ${discountedTotal.toFixed(2)} �
           }
           return res.status(500).json({ error: `Ошибка отправки в Telegram: ${errorDescription}` });
         });
-      });
-    }
-  );
+      }
+    );
+  });
 });
 
 // Admin routes
@@ -1042,6 +1052,9 @@ app.delete('/promo-codes/:id', authenticateToken, (req, res) => {
 app.post('/branches', authenticateToken, (req, res) => {
   const { name, address, phone, telegram_chat_id } = req.body;
   if (!name) return res.status(400).json({ error: 'Название филиала обязательно' });
+  if (telegram_chat_id && !telegram_chat_id.match(/^-\d+$/)) {
+    return res.status(400).json({ error: 'Некорректный формат telegram_chat_id. Должен начинаться с "-" и содержать только цифры.' });
+  }
   db.query(
     'INSERT INTO branches (name, address, phone, telegram_chat_id) VALUES (?, ?, ?, ?)',
     [name, address || null, phone || null, telegram_chat_id || null],
@@ -1059,6 +1072,9 @@ app.put('/branches/:id', authenticateToken, (req, res) => {
   const { id } = req.params;
   const { name, address, phone, telegram_chat_id } = req.body;
   if (!name) return res.status(400).json({ error: 'Название филиала обязательно' });
+  if (telegram_chat_id && !telegram_chat_id.match(/^-\d+$/)) {
+    return res.status(400).json({ error: 'Некорректный формат telegram_chat_id. Должен начинаться с "-" и содержать только цифры.' });
+  }
   db.query(
     'UPDATE branches SET name = ?, address = ?, phone = ?, telegram_chat_id = ? WHERE id = ?',
     [name, address || null, phone || null, telegram_chat_id || null, id],
@@ -1276,7 +1292,6 @@ app.post('/products', authenticateToken, (req, res) => {
           } else {
             fetchNewProduct();
           }
-
           function fetchNewProduct() {
             db.query(
               `
@@ -1361,7 +1376,6 @@ app.put('/products/:id', authenticateToken, (req, res) => {
         imageKey = existing[0].image;
         updateProduct();
       }
-
       function updateProduct() {
         db.query(
           `UPDATE products SET
@@ -1441,7 +1455,6 @@ app.put('/products/:id', authenticateToken, (req, res) => {
           }
         );
       }
-
       function fetchUpdatedProduct() {
         db.query(
           `
@@ -1505,7 +1518,6 @@ app.delete('/products/:id', authenticateToken, (req, res) => {
     } else {
       deleteProduct();
     }
-
     function deleteProduct() {
       db.query('DELETE FROM products WHERE id = ?', [id], (err) => {
         if (err) {
@@ -1601,7 +1613,6 @@ app.put('/discounts/:id', authenticateToken, (req, res) => {
       } else {
         updateDiscount();
       }
-
       function updateDiscount() {
         db.query(
           'UPDATE discounts SET product_id = ?, discount_percent = ?, expires_at = ?, is_active = ? WHERE id = ?',
@@ -1656,6 +1667,8 @@ app.delete('/discounts/:id', authenticateToken, (req, res) => {
     }
   );
 });
+
+
 
 app.post('/banners', authenticateToken, (req, res) => {
   upload(req, res, (err) => {
