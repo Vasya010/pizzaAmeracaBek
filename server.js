@@ -1361,7 +1361,8 @@ upload(req, res, async (err) => {
     `, [result.insertId]);
 
     res.status(201).json({
-      ...newBanner[ moody0],
+     ...newBanner[0],
+
       image: `https://nukesul-brepb-651f.twc1.net/product-image/${newBanner[0].image.split("/").pop()}`
     });
   } catch (err) {
