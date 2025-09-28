@@ -14,7 +14,7 @@ app.use(cors());
 app.use(express.json());
 const JWT_SECRET = "your_jwt_secret_key";
 
-// Настройка S3Client для Timeweb Cloud
+// Настройка S3Client для Timeweb Cloud55
 const s3Client = new S3Client({
   credentials: {
     accessKeyId: "GIMZKRMOGP4F0MOTLVCE",
